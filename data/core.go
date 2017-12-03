@@ -47,7 +47,7 @@ var errNoExists = errors.New("does not exist")
 var errNotPointer = errors.New("receiver is not a pointer")
 
 // filterRegex regex to file keys of unsupported chars in keys.
-var filterRegex = regexp.MustCompile("[^a-zA-Z0-9]+")
+var filterRegex = regexp.MustCompile("[^a-zA-Z0-9\\-]+")
 
 // Store store represents an interface to a data-store
 // where objects are held.
@@ -91,6 +91,8 @@ type Iterator interface {
 	// where the keys used in the iteration could be deleted during. If this is the
 	// case the passed receiver will not be populated, but next may return true.
 	Next(interface{}) bool
+	// Key retrieves the key at the current position or an error.
+	Key() (string, error)
 }
 
 // fileIterator an instance of an iterator which
@@ -112,6 +114,22 @@ type fileIterator struct {
 // newIterator initialises a new iterator.
 func (f *fileStore) newIterator() Iterator {
 	return &fileIterator{keys: f.index.keys(), store: f}
+}
+
+// Key implements Iterator iterface.
+func (f *fileIterator) Key() (string, error) {
+	if f.isClosed() {
+		return "", errClosed
+	}
+
+	f.Lock()
+	defer f.Unlock()
+
+	if len(f.keys) == 0 {
+		return "", errNoExists
+	}
+
+	return f.keys[0], nil
 }
 
 // Next implements Iterator interface.

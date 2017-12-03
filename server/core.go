@@ -12,8 +12,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/jacklaaa89/skybet/data"
-	"github.com/jacklaaa89/skybet/object"
+	"github.com/jacklaaa89/server/data"
+	"github.com/jacklaaa89/server/object"
 )
 
 // defaultPort the default port to listen to.
@@ -118,6 +118,19 @@ func (s *server) list(c *gin.Context) {
 
 	iterator, _ := s.store.Iterate()
 	for iterator.Next(&receiver) {
+		// get the id for this iteration.
+		k, err := iterator.Key()
+		if err != nil {
+			continue
+		}
+		// attempt to parse it into a uuid.
+		id, err := uuid.Parse(k)
+		if err != nil {
+			continue
+		}
+
+		// set the id on the receiver object.
+		receiver.ID = id
 		users.Users = append(users.Users, receiver)
 	}
 

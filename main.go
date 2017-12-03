@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 
-	"github.com/jacklaaa89/skybet/server"
+	"github.com/jacklaaa89/server/server"
 )
 
 // main runs the main server using the default config.
