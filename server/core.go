@@ -50,7 +50,7 @@ func New(ctx context.Context, c *Config) (Server, error) {
 
 	// define routes.
 	router := gin.Default()
-	group := router.Group("/user")
+	group := router.Group("/api/user")
 	{
 		group.GET("/", s.list)
 		group.PATCH("/:id", s.patch)
