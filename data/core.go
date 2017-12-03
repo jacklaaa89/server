@@ -7,12 +7,12 @@ import (
 	"io/ioutil"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
-	"path/filepath"
-	"reflect"
 
 	"github.com/cenkalti/backoff"
 	lock "github.com/nightlyone/lockfile"
@@ -20,6 +20,8 @@ import (
 )
 
 const (
+	// defaultDirectory the default directory name to store data.
+	defaultDirectory = "store"
 	// indexFile the location of the index file.
 	indexFile = "index.dat"
 	// lockPrefix the prefix for a os lock file.
@@ -27,6 +29,9 @@ const (
 	// vExt the value extension.
 	vExt = ".msgpack"
 )
+
+// defaultPath the default directory.
+var defaultPath = filepath.Join(os.TempDir(), defaultDirectory)
 
 // errNoDirectory error returned when the supplied directory is
 // actually not a directory.
@@ -49,7 +54,7 @@ var filterRegex = regexp.MustCompile("[^a-zA-Z0-9]+")
 // For this trivial example the store will be similar to that
 // of redis data store except all of the entries are stored to disk.
 // values are stored in a msg-pack format, so you can use the
-// msgpack.CustomMarshaler/CustomUnmarshaler interfaces.
+// msgpack.Marshaler/Unmarshaler interfaces.
 type Store interface {
 	io.Closer
 	// Get get a model from the store and populates the passed receiver.
@@ -58,10 +63,111 @@ type Store interface {
 	// if a duplicate model is found the object is updated.
 	Set(string, interface{}) error
 	// Keys returns the list of keys in the system.
-	// bare in mind keys are formatted into hashes.
+	// bare in mind keys are formatted i.e. removing
+	// non-alphanumeric characters.
 	Keys() ([]string, error)
+	// Iterate provides an iterator to iterate over all of the
+	// keys in the store.
+	//
+	// Iterators are automatically closed, but if you need to force
+	// them closed before their time, call Close.
+	Iterate() (Iterator, error)
 	// Remove removes an element from the store.
 	Remove(string) error
+	// Flush removes all entries from the store.
+	Flush() error
+}
+
+// Iterator an instance of an iterator.
+type Iterator interface {
+	io.Closer
+	// Next called with a receiver to load the next
+	// item from the store.
+	// Will return false when there are no entries left in the current cursor or if closed
+	// is called.
+	//
+	// WARNING - because an iterator maintains the current state of the current
+	// iteration, this works in the same way that the redis iterator performs
+	// where the keys used in the iteration could be deleted during. If this is the
+	// case the passed receiver will not be populated, but next may return true.
+	Next(interface{}) bool
+}
+
+// fileIterator an instance of an iterator which
+// iterates a list of files.
+//
+// this would be more performant if the index was a btree
+// implementation as we could just hold the current index
+// and move to next, rather than holding the whole key-list in this object.
+type fileIterator struct {
+	sync.RWMutex
+	// keys the list of keys from the index.
+	keys []string
+	// store the reference to the store.
+	store Store
+	// closed whether the iterator is closed.
+	closed bool
+}
+
+// newIterator initialises a new iterator.
+func (f *fileStore) newIterator() Iterator {
+	return &fileIterator{keys: f.index.keys(), store: f}
+}
+
+// Next implements Iterator interface.
+func (f *fileIterator) Next(r interface{}) bool {
+	if f.isClosed() {
+		return false
+	}
+
+	f.Lock()
+	defer f.Unlock()
+
+	// func to close the iterator.
+	// we don't need to lock as we have
+	// already locked above.
+	close := func() {
+		f.closed = true
+	}
+
+	// if we have no keys left, return false.
+	if len(f.keys) == 0 {
+		close()
+		return false
+	}
+
+	// pop the first index from the list of keys.
+	var k string
+	k, f.keys = f.keys[0], f.keys[1:]
+
+	// attempt to get the key from the index.
+	if err := f.store.Get(k, r); err != nil && err != errNoExists {
+		close()
+		return false
+	}
+
+	return true
+}
+
+// isClosed determines if the store is closed.
+func (f *fileIterator) isClosed() bool {
+	f.Lock()
+	defer f.Unlock()
+
+	return f.closed
+}
+
+// Close closes the fileIterator.
+func (f *fileIterator) Close() error {
+	if f.isClosed() {
+		return errClosed
+	}
+
+	f.Lock()
+	defer f.Unlock()
+
+	f.closed = true
+	return nil
 }
 
 // Config configuration for the data store.
@@ -70,10 +176,20 @@ type Config struct {
 	Dir string `json:"directory"`
 }
 
+// NewDefaultConfig initialises new config with the default path.
+func NewDefaultConfig() *Config {
+	return &Config{Dir: defaultPath}
+}
+
 // indexUpdater callback which gives access to the index in a locked state.
 type indexUpdater func(in *internal)
 
 // internal an internal index.
+//
+// As stated on fileStore in a production system
+// this would not be a map.
+// Instead we would use something like a btree implementation.
+// see: https://github.com/google/btree
 type internal map[string]string
 
 // index an internal index of the data in the store.
@@ -136,8 +252,17 @@ func (i *index) get(k string) (string, error) {
 	return s, nil
 }
 
-// fileStore an instance of a file store
-// which implements the Store interface.
+// fileStore an instance of a file store which implements the Store interface.
+// In a production implementation the index would not be a map
+// but instead a slice of `shards` so we can update portions of the
+// index concurrently increasing rebuild performance.
+//
+// We could also use something other than a map (i.e. a btree implementation)
+// because of the amount of allocations and the affect Garbage Collection
+// has on extremely large maps.
+//
+// To also increase performance in a production system, we could also
+// hold data in memory for speed periodically flush to disk.
 type fileStore struct {
 	// a mutex when performing concurrent operations.
 	sync.RWMutex
@@ -181,6 +306,9 @@ func (f *fileStore) load() error {
 }
 
 // updateIndex updates the internal index.
+// the supplied indexUpdater is passed the index in a locked state which we can
+// perform mutations to and this method manages locking the index file and
+// updating the index file on disk after the mutation has took place.
 func (f *fileStore) updateIndex(updater indexUpdater) error {
 	// lock the write to the index.
 	f.index.update(updater)
@@ -206,17 +334,24 @@ func (f *fileStore) updateIndex(updater indexUpdater) error {
 type fileLock struct {
 	// Err an error returned from locking a file.
 	Err error
-	// l the locked file.
+	// l the locked file handler.
 	l lock.Lockfile
 }
 
-// lock the returned channel blocks until we have access to
-// write to the file store.
+// lock wrap the lockFile method with the fileStores context.
 func (f *fileStore) lock(file string) <-chan fileLock {
+	return lockFile(f.ctx, file)
+}
+
+// lockFile the returned channel blocks until we have access to
+// write to the file store.
+// this method uses a exponential backoff strategy up to 10 attempts
+// when we are attempting to lock the supplied file.
+func lockFile(ctx context.Context, file string) <-chan fileLock {
 	lc := make(chan fileLock)
 	go func() {
 		// attempt to open the lock file.
-		l, err := lock.New(filepath.Join(os.TempDir(), filepath.Base(file) + lockPrefix))
+		l, err := lock.New(filepath.Join(os.TempDir(), filepath.Base(file)+lockPrefix))
 		if err != nil {
 			lc <- fileLock{Err: err}
 			return
@@ -225,10 +360,10 @@ func (f *fileStore) lock(file string) <-chan fileLock {
 		eb := backoff.WithMaxTries(backoff.NewExponentialBackOff(), 10)
 		lc <- fileLock{Err: backoff.Retry(func() error {
 			select {
-			case <-f.ctx.Done():
+			case <-ctx.Done():
 				// if the context is done, we dont want to continue, but
 				// we want an error to be returned.
-				return backoff.Permanent(f.ctx.Err())
+				return backoff.Permanent(ctx.Err())
 			default:
 				// otherwise continue to try the lock.
 				return l.TryLock()
@@ -248,6 +383,8 @@ func (f *fileStore) hash(k string) string {
 }
 
 // Get implements Store interface.
+// if the passed receiver is not the correct type, no error is returned
+// but the reciever is not populated (unless they are incompatible types i.e. struct & string)
 func (f *fileStore) Get(k string, r interface{}) error {
 	// ensure the store is still open.
 	if f.isClosed() {
@@ -291,6 +428,7 @@ func (f *fileStore) get(i string) ([]byte, error) {
 	return ioutil.ReadFile(s)
 }
 
+// Set implements Store interface.
 func (f *fileStore) Set(k string, v interface{}) error {
 	// ensure the store is still open.
 	if f.isClosed() {
@@ -312,7 +450,7 @@ func (f *fileStore) Set(k string, v interface{}) error {
 
 // fileName generates a filename for a entry.
 func (f *fileStore) fileName(i string) string {
-	return filepath.Join(f.dir.Name(), i + vExt)
+	return filepath.Join(f.dir.Name(), i+vExt)
 }
 
 // set sets data into the datastore directory.
@@ -360,7 +498,7 @@ func (f *fileStore) set(i string, d []byte) error {
 // Keys returns all of the keys in the store.
 func (f *fileStore) Keys() ([]string, error) {
 	// this is where the index shines. we can just return all of the keys in
-	// the index.
+	// the index, rather than iterating the directory structure.
 	if f.isClosed() {
 		return nil, errClosed
 	}
@@ -369,6 +507,14 @@ func (f *fileStore) Keys() ([]string, error) {
 	defer f.Unlock()
 
 	return f.index.keys(), nil
+}
+
+// Iterate implements Store interface.
+func (f *fileStore) Iterate() (Iterator, error) {
+	f.Lock()
+	defer f.Unlock()
+
+	return f.newIterator(), nil
 }
 
 // Remove implements Store interface.
@@ -398,6 +544,43 @@ func (f *fileStore) remove(k string) error {
 	return os.Remove(f.fileName(k))
 }
 
+// Flush implements Store interface.
+func (f *fileStore) Flush() error {
+	if f.isClosed() {
+		return errClosed
+	}
+
+	f.Lock()
+	defer f.Unlock()
+
+	// empty the index.
+	defer f.updateIndex(func(i *internal) {
+		*i = make(map[string]string)
+	})
+
+	root := f.dir.Name()
+	// remove all of the data files.
+	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if path == root {
+			return nil // skip the root directory.
+		}
+
+		// if we have a data entry, remove.
+		if filepath.Ext(path) == vExt {
+			// lock the file while we are deleting incase
+			// other clients attempt to read the file.
+			fl := <-f.lock(path)
+			if fl.Err != nil {
+				return fl.Err
+			}
+			defer fl.l.Unlock()
+			os.Remove(path)
+		}
+
+		return nil
+	})
+}
+
 // Close implements io.Closer interface.
 func (f *fileStore) Close() error {
 	if f.isClosed() {
@@ -417,7 +600,7 @@ func (f *fileStore) isClosed() bool {
 	return f.closed
 }
 
-// close closes the filestore.
+// close closes the file-store.
 func (f *fileStore) close() error {
 	f.cancel()
 	f.closed = true
@@ -425,13 +608,39 @@ func (f *fileStore) close() error {
 	return f.dir.Close()
 }
 
+// ensureDirectory ensures that the data directory exists.
+func ensureDirectory(ctx context.Context, dir string) (*os.File, error) {
+	fl := <-lockFile(ctx, dir)
+	if fl.Err != nil {
+		return nil, fl.Err
+	}
+
+	defer fl.l.Unlock()
+
+	// attempt to make the directory.
+	err := os.Mkdir(dir, os.ModePerm)
+	if err != nil {
+		return nil, err
+	}
+
+	// return the newly generated directory.
+	return os.Open(dir)
+}
+
 // New initialises a new data store or returns
 // an error if it couldn't be opened.
 func New(ctx context.Context, c *Config) (Store, error) {
 	// open the file in the config in write mode.
 	dir, err := os.Open(c.Dir)
-	if err != nil {
+	if err != nil && !os.IsNotExist(err) {
 		return nil, err
+	}
+
+	// if our directory doesn't exist, attempt to create it.
+	if os.IsNotExist(err) {
+		if dir, err = ensureDirectory(ctx, c.Dir); err != nil {
+			return nil, err
+		}
 	}
 
 	// ensure that we have a directory.

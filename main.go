@@ -3,23 +3,15 @@ package main
 import (
 	"context"
 
-	"github.com/jacklaaa89/skybet/data"
-	"github.com/davecgh/go-spew/spew"
+	"github.com/jacklaaa89/skybet/server"
 )
 
-type Object struct {
-	Key string
-	Secret string
-}
-
+// main runs the main server using the default config.
 func main() {
-	config := &data.Config{Dir: "/Users/jacktimblin/test"}
-	store, err := data.New(context.Background(), config)
+	server, err := server.New(context.Background(), server.NewDefaultConfig())
 	if err != nil {
 		panic(err)
 	}
 
-	var ob Object
-	err = store.Get("object", &ob)
-	spew.Dump(err, ob)
+	server.Listen()
 }

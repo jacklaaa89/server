@@ -1,8 +1,8 @@
 package object
 
-// Person a representation of a person, a person has a firstname
+// User a representation of a person, a person has a firstname
 // and a surname.
-type Person struct {
-	FirstName string `json:"first_name"`
-	Surname   string `json:"last_name"`
+type User struct {
+	FirstName string `msgpack:"first" json:"first"`
+	Surname   string `msgpack:"last" json:"last"`
 }
