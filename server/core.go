@@ -12,12 +12,20 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+
 	"github.com/jacklaaa89/server/data"
 	"github.com/jacklaaa89/server/object"
+	"github.com/jacklaaa89/server/template"
 )
 
-// defaultPort the default port to listen to.
-const defaultPort = 8080
+const (
+	// defaultPort the default port to listen to.
+	defaultPort = 8080
+	// apiEndpoint the endpoint for the user api.
+	apiEndpoint = "/api/user"
+	// indexTemplate the key to the index static template.
+	indexTemplate = "index.html"
+)
 
 // errClosed error returned when the store is closed.
 var errClosed = errors.New("closed")
@@ -48,14 +56,20 @@ func New(ctx context.Context, c *Config) (Server, error) {
 	}
 	s.store = store
 
-	// define routes.
+	// initialise gin.
 	router := gin.Default()
-	group := router.Group("/api/user")
+
+	// define the index route.
+	router.GET("/", s.index)
+
+	// define api routes.
+	group := router.Group(apiEndpoint)
 	{
 		group.GET("/", s.list)
 		group.PATCH("/:id", s.patch)
 		group.POST("/", s.post)
 		group.GET("/:id", s.get)
+		group.DELETE("/:id", s.remove)
 	}
 
 	// initialise a new http.Server
@@ -94,6 +108,15 @@ type Server interface {
 }
 
 // server our instance of a server.
+//
+// This server implementation uses the standard http package
+// using the Gin framework as the Router. Using this structure
+// we are able to get access to the graceful shutdown methods
+// added to http.Server in go v1.8+
+//
+// Gin gives some good debugging and logging tools out of the box.
+//
+// See: https://github.com/gin-gonic/gin
 type server struct {
 	// mutex to control access.
 	sync.RWMutex
@@ -109,11 +132,39 @@ type server struct {
 	store data.Store
 }
 
+// ViewData data to pass to the index view.
+type ViewData struct {
+	Endpoint string
+}
+
+// index serves static content.
+//
+// This func returns the static index page for the application.
+// This could be replaced with a JS client frontend including
+// vueJS or React running on node.
+//
+// This api would then be the back end to add/update user records in a
+// micro-service architechture.
+//
+// For simplicity the static template is loaded as an asset into
+// the binary of this application as a const using go-bindata.
+//
+// See: https://github.com/jteeuwen/go-bindata
+func (*server) index(c *gin.Context) {
+	r, err := template.RenderAsset(indexTemplate, ViewData{Endpoint: apiEndpoint})
+	if err != nil {
+		c.AbortWithError(http.StatusNotFound, err)
+		return
+	}
+
+	c.Render(http.StatusOK, r)
+}
+
 // list lists all of the users.
 func (s *server) list(c *gin.Context) {
 	var (
-		receiver object.User
 		users    = object.NewList(http.StatusOK)
+		receiver object.User
 	)
 
 	iterator, _ := s.store.Iterate()
@@ -165,6 +216,26 @@ func (s *server) patch(c *gin.Context) {
 
 	// then update in the data-store.
 	if err := s.store.Set(id, &u); err != nil {
+		s.withError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, object.WithSuccess("OK"))
+}
+
+// remove removes a user from the data-store.
+func (s *server) remove(c *gin.Context) {
+	id := c.Param("id")
+
+	// ensure that the user exists.
+	_, err := s.getUser(id)
+	if err != nil {
+		s.withError(c, err)
+		return
+	}
+
+	// then update in the data-store.
+	if err := s.store.Remove(id); err != nil {
 		s.withError(c, err)
 		return
 	}

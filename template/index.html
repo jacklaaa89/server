@@ -1,0 +1,363 @@
+<html>
+    <head>
+        <link
+            rel="stylesheet"
+            href="https://maxcdn.bootstrapcdn.com/bootstrap/4.0.0-beta.2/css/bootstrap.min.css"
+            integrity="sha384-PsH8R72JQ3SOdhVi3uxftmaW6Vc51MKb0q5P2rRUpPvrszuE4W1povHYgTpBfshb"
+            crossorigin="anonymous"
+        />
+    </head>
+    <div class="container">
+        <div class="row">
+            <div class="col-sm">
+                <div class="card">
+                    <div class="card-header">
+                            Users
+                    </div>
+                    <div class="card-body">
+                        <div class="users" style="display:none;">
+                            <table class="table">
+                                <tr>
+                                    <th>First name</th>
+                                    <th>Last name</th>
+                                    <th></th>
+                                </tr>
+                            </table>
+                        </div>
+                        <div class="loading text-center">
+                            <i class="fa fa-circle-o-notch fa-spin fa-2x fa-fw"></i>
+                            <span class="sr-only">Loading...</span>                                
+                        </div>
+                        <div class="no-results text-center" style="display:none;">
+                            No Users
+                        </div>
+                    </div>
+                    <div class="card-footer muted">
+                        <td><a href="#" id="add" class="card-link not-active">Add</a></td>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="userModal">
+        <div class="modal-dialog" role="document">
+            <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"></h5>
+                <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+                <span aria-hidden="true">&times;</span>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="first">First Name</label>
+                    <input type="text" class="form-control" id="first" placeholder="First Name">
+                </div>
+                <div class="form-group">
+                    <label for="last">Last Name</label>
+                    <input type="text" class="form-control" id="last" placeholder="Last Name">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-primary save">Save changes</button>
+                <button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
+            </div>
+            </div>
+        </div>
+    </div>
+
+    <style>
+        th { border-top:none!important; } 
+        .container { margin-top:20px; width:50rem; }
+        .not-active { pointer-events: none; cursor: default; color: rgb(156, 155, 155); }       
+    </style>
+
+    <!-- Templates -->
+    <script type="text/template" id="userRow">
+        <tr data-id>
+            <td data-first></td>
+            <td data-last></td>
+            <td>
+                <a href="#" class="card-link update">Update</a>
+                <a href="#" class="card-link remove">Remove</a>
+            </td>
+        </tr>
+    </script>
+    <!-- End Templates -->
+
+    <!-- Javascript -->
+    <script src="https://use.fontawesome.com/2d60cc509a.js"></script>
+    <script
+        src="https://code.jquery.com/jquery-3.2.1.min.js"
+        integrity="sha256-hwg4gsxgFZhOsEEamdOYGBf13FyQuiTwlAQgxVSNgt4="
+        crossorigin="anonymous">
+    </script>
+    <script
+        src="https://cdnjs.cloudflare.com/ajax/libs/popper.js/1.12.3/umd/popper.min.js"
+        integrity="sha384-vFJXuSJphROIrBnz7yo7oB41mKfc8JzQZiCq4NCceLEaO4IHwicKwpJf9c9IpFgh"
+        crossorigin="anonymous">
+    </script>
+    <script
+        src="https://maxcdn.bootstrapcdn.com/bootstrap/4.0.0-beta.2/js/bootstrap.min.js"
+        integrity="sha384-alpBpkh1PFOepccYVYDB4do5UnbKysX5WZXm3XxPqe5iKTfUKjNkCk9SaVuEZflJ"
+        crossorigin="anonymous">
+    </script>
+    <script type="text/javascript">
+        // userService the service which manages getting / updating users.
+        var userService = {
+            /**
+             * The API endpoint.
+             * @param string
+             */
+            endpoint: '{{.Endpoint}}',
+
+            /**
+             * initialises the user service, loading users from the system.
+             * @return void
+             */
+            init: function() {
+                var _this = this;
+                this.getUsers();
+                $("#add").off("click").on("click", function(ev) {
+                    ev.preventDefault();
+                    _this.addUser();
+                });
+            },
+
+            /**
+             * gets and appends the list of users from the api to the table.
+             * @return void
+             */
+            getUsers: function() {
+                var listUsers = this.endpoint;
+                var _this = this;
+                $.ajax({
+                    url: listUsers,
+                    method: "GET",
+                    contentType: "application/json",
+                    success: function(response) {
+                        // show the no results content if there are no users or an error
+                        // occurred.
+                        if (response.code !== 200 || response.users.length === 0) {
+                            _this.showNotFound();
+                            return
+                        }
+                        $.each(response.users, function(index, user) {
+                            console.log(user);
+                            // build the user row.
+                            var template = $($("#userRow").html());
+                            _this.populate(template, user);
+
+                            //append the user row to the table.
+                            _this.addRow(template);
+                        });
+
+                        // display the table.
+                        _this.hideNotFound();
+                    },
+                    complete: function() {
+                        // always activate the add button.
+                        $("#add").removeClass("not-active");
+                    }
+                })
+            },
+
+            /**
+             * Updates a user using the API.
+             *
+             * @param {Object} user    The user to update.
+             * @param {Object} element The TR row which the user is set.
+             * @return void
+             */
+            updateUser: function(user, element) {
+                this.displayModal(element, user);
+            },
+
+            /**
+             * Adds a new user into the table.
+             * @return void 
+             */
+            addUser: function() {
+                this.displayModal($($("#userRow").html()));
+            },
+
+            /**
+             * populates a user row and attaches event handlers.
+             * @return void 
+             */
+            populate: function(element, user) {
+                var _this = this;
+                element.attr("data-id", user.id);
+                element.find("[data-first]").text(user.first);
+                element.find("[data-last]").text(user.last);
+                // assign events to the actions for this user.
+                var update = element.find("a.update");
+                var remove = element.find("a.remove");
+                update.off("click").on("click", function(ev) {
+                    ev.preventDefault();
+                    _this.updateUser(user, element);
+                });
+                remove.off("click").on("click", function(ev) {
+                    ev.preventDefault();
+                    _this.removeUser(user.id, element);
+                });
+            },
+
+            /**
+             * Displays the modal and uses the api to submit the information.
+             *
+             * @param {Object} element The element where the user exists. This
+             *                         will be a new element if it is a new user.
+             * @param {Object} user    The user we are updating, this will be undefined
+             *                         if we are adding a new user.
+             * @return void
+             */
+            displayModal: function(element, user) {
+                var _this = this;
+                
+                // set variables.
+                var method = "POST";
+                var url = this.endpoint;
+                var title = "Add";
+                var modal = $('#userModal');
+                var first = modal.find("#first");
+                var last = modal.find("#last");
+
+                // if we have a user. We are updating.s
+                if (user !== undefined) {
+                    method = "PATCH";
+                    url += "/" + user.id;
+                    title = "Update";
+                    first.val(user.first);
+                    last.val(user.last);
+                } else {
+                    user = {};
+                }
+
+                // attach save functionality.
+                modal.find(".save").off("click").on("click", function(ev) {
+                    ev.preventDefault();
+                    // hide the modal.
+                    modal.modal('hide');
+
+                    user.first = first.val();
+                    user.last = last.val();
+
+                    // disable add / update & remove buttons during update.
+                    $.ajax({
+                        url: url,
+                        method: method,
+                        contentType: "application/json",
+                        data: JSON.stringify(user),
+                        beforeSend: function() {
+                            _this.showLoading();
+                            _this.disableActions();
+                        },
+                        success: function(response) {
+                            if (response.id !== undefined) {
+                                user.id = response.id
+                            }
+                            _this.populate(element, user);
+                            if (response.id !== undefined) {
+                                _this.addRow(element);
+                            }
+                        },
+                        complete: function() {
+                            if ($('.table tr').length === 1) {
+                                _this.showNotFound();
+                            } else {
+                                _this.hideNotFound();
+                            }
+                            _this.enableActions();
+                        }
+                    })
+                });
+
+                // set the modal title.
+                modal.find(".modal-title").text(title + " User");
+                // display the modal.
+                modal.modal();
+            },
+
+            addRow: function(element) {
+                $("table tr:last").after(element);
+            },
+
+            /**
+             * shows the not found container.
+             * @return void
+             */
+            showNotFound: function() {
+                $(".no-results").show();
+                $(".users").hide();
+                $(".loading").hide();
+            },
+
+            /**
+             * hides the not found container.
+             * @return void
+             */
+            hideNotFound: function() {
+                $(".no-results").hide();
+                $(".users").show();
+                $(".loading").hide();
+            },
+
+            /**
+             * shows the loading icon.
+             * @return void
+             */
+            showLoading: function() {
+                $(".no-results").hide();
+                $(".users").hide();
+                $(".loading").show();
+            },
+
+            /**
+             * disables all actions in the container.
+             * @return void
+             */
+            disableActions: function() {
+                $('.container').find("a").addClass(".not-active");
+            },
+
+            /**
+             * enables all actions in the container.
+             * @return void
+             */
+             enableActions: function() {
+                $('.container').find("a").removeClass(".not-active");
+            },
+
+            /**
+             * removes a user using the API.
+             * @return void
+             */
+            removeUser: function(id, element) {
+                var _this = this;
+                $.ajax({
+                    url: _this.endpoint + "/" + id,
+                    method: "DELETE",
+                    beforeSend: function() {
+                        _this.disableActions();
+                    },
+                    success: function(response) {
+                        $(element).remove();
+                        // if only the header remains.
+                        if ($('.table tr').length === 1) {
+                            _this.showNotFound();
+                        }
+                    },
+                    complete: function() {
+                        _this.enableActions();
+                    }
+                })
+            }
+        };
+
+        // start the user service.
+        userService.init();
+    </script>
+    <!-- End Javscipt -->
+</html>

@@ -28,6 +28,10 @@ const (
 	lockPrefix = ".lock"
 	// vExt the value extension.
 	vExt = ".msgpack"
+	// lockAttempts the max amount of file lock attempts to make.
+	// bear in mind that we use an exponential backoff strategy,
+	// so it would take quite a while to reach 10 attempts.
+	lockAttempts = 10
 )
 
 // defaultPath the default directory.
@@ -109,6 +113,8 @@ type fileIterator struct {
 	store Store
 	// closed whether the iterator is closed.
 	closed bool
+	// key the current key.
+	key string
 }
 
 // newIterator initialises a new iterator.
@@ -118,18 +124,21 @@ func (f *fileStore) newIterator() Iterator {
 
 // Key implements Iterator iterface.
 func (f *fileIterator) Key() (string, error) {
+	// ensure the store is not closed.
 	if f.isClosed() {
 		return "", errClosed
 	}
 
+	// lock concurrent processes.
 	f.Lock()
 	defer f.Unlock()
 
-	if len(f.keys) == 0 {
+	if len(f.key) == 0 {
 		return "", errNoExists
 	}
 
-	return f.keys[0], nil
+	// return the first entry in our key list.
+	return f.key, nil
 }
 
 // Next implements Iterator interface.
@@ -155,11 +164,12 @@ func (f *fileIterator) Next(r interface{}) bool {
 	}
 
 	// pop the first index from the list of keys.
-	var k string
-	k, f.keys = f.keys[0], f.keys[1:]
+	f.key, f.keys = f.keys[0], f.keys[1:]
 
 	// attempt to get the key from the index.
-	if err := f.store.Get(k, r); err != nil && err != errNoExists {
+	// if the key does not exist, true is still returned
+	// as this entry made have been changed while iterating this cursor.
+	if err := f.store.Get(f.key, r); err != nil && err != errNoExists {
 		close()
 		return false
 	}
@@ -184,6 +194,7 @@ func (f *fileIterator) Close() error {
 	f.Lock()
 	defer f.Unlock()
 
+	// mark this iterator as closed.
 	f.closed = true
 	return nil
 }
@@ -207,6 +218,7 @@ type indexUpdater func(in *internal)
 // As stated on fileStore in a production system
 // this would not be a map.
 // Instead we would use something like a btree implementation.
+//
 // see: https://github.com/google/btree
 type internal map[string]string
 
@@ -228,6 +240,10 @@ func (i *index) unmarshal(d []byte) error {
 }
 
 // marshal marshals the index into byte form.
+// we utilise msgpack for this as its like JSON but
+// takes less space on disk also meaning it can be read faster.
+//
+// see: https://msgpack.org/index.html
 func (i *index) marshal() ([]byte, error) {
 	i.Lock()
 	defer i.Unlock()
@@ -243,6 +259,9 @@ func (i *index) update(updater indexUpdater) {
 }
 
 // keys returns all of the keys in the index.
+//
+// This will not be the most performant way of
+// acheiving this on a system with millions of keys.
 func (i *index) keys() []string {
 	i.Lock()
 	defer i.Unlock()
@@ -271,16 +290,17 @@ func (i *index) get(k string) (string, error) {
 }
 
 // fileStore an instance of a file store which implements the Store interface.
+//
 // In a production implementation the index would not be a map
 // but instead a slice of `shards` so we can update portions of the
-// index concurrently increasing rebuild performance.
+// index concurrently, increasing rebuild performance.
 //
 // We could also use something other than a map (i.e. a btree implementation)
 // because of the amount of allocations and the affect Garbage Collection
 // has on extremely large maps.
 //
 // To also increase performance in a production system, we could also
-// hold data in memory for speed periodically flush to disk.
+// hold data in memory for speed & periodically flush to disk.
 type fileStore struct {
 	// a mutex when performing concurrent operations.
 	sync.RWMutex
@@ -312,6 +332,7 @@ func (f *fileStore) load() error {
 		return fl.Err
 	}
 
+	// ensure we unlock the file.
 	defer fl.l.Unlock()
 
 	// load the index file and read it into memory.
@@ -324,7 +345,8 @@ func (f *fileStore) load() error {
 }
 
 // updateIndex updates the internal index.
-// the supplied indexUpdater is passed the index in a locked state which we can
+//
+// The supplied indexUpdater is passed the index in a locked state which we can
 // perform mutations to and this method manages locking the index file and
 // updating the index file on disk after the mutation has took place.
 func (f *fileStore) updateIndex(updater indexUpdater) error {
@@ -375,7 +397,8 @@ func lockFile(ctx context.Context, file string) <-chan fileLock {
 			return
 		}
 		// attempt to try the lock with an exponential back-off policy.
-		eb := backoff.WithMaxTries(backoff.NewExponentialBackOff(), 10)
+		eb := backoff.WithMaxTries(backoff.NewExponentialBackOff(), lockAttempts)
+		// push the result directly into the pending file lock channel.
 		lc <- fileLock{Err: backoff.Retry(func() error {
 			select {
 			case <-ctx.Done():
@@ -395,14 +418,17 @@ func lockFile(ctx context.Context, file string) <-chan fileLock {
 // replacement a placeholder for an empty string.
 var replacement string
 
-// hash prepares and hashes a string key to in an uint64.
+// hash prepares and hashes a string key.
 func (f *fileStore) hash(k string) string {
 	return strings.ToUpper(filterRegex.ReplaceAllString(k, replacement))
 }
 
 // Get implements Store interface.
-// if the passed receiver is not the correct type, no error is returned
-// but the reciever is not populated (unless they are incompatible types i.e. struct & string)
+//
+// If the passed receiver is not the correct type, no error is returned
+// but the reciever is not populated. This only applies that if the reciever
+// and type are at least somewhat compatible, i.e. we dont't try unmarshal a string into
+// a receiver of type struct.
 func (f *fileStore) Get(k string, r interface{}) error {
 	// ensure the store is still open.
 	if f.isClosed() {
@@ -428,6 +454,7 @@ func (f *fileStore) Get(k string, r interface{}) error {
 }
 
 // get gets the raw data from the data-store directory if it exists.
+//
 // WARNING - this method is not thread-safe. it should be used by methods
 // which lock.
 func (f *fileStore) get(i string) ([]byte, error) {
@@ -472,6 +499,9 @@ func (f *fileStore) fileName(i string) string {
 }
 
 // set sets data into the datastore directory.
+//
+// WARNING - this method is not thread-safe. it should be used by methods
+// which lock.
 func (f *fileStore) set(i string, d []byte) error {
 	// write the file to the datastore.
 	// update the index file.
@@ -517,6 +547,10 @@ func (f *fileStore) set(i string, d []byte) error {
 func (f *fileStore) Keys() ([]string, error) {
 	// this is where the index shines. we can just return all of the keys in
 	// the index, rather than iterating the directory structure.
+	//
+	// However the increase of speed comes at a price, the key list can only
+	// be offered as a estimate as other processes may have modified the underlined
+	// store & we are in between index updates.
 	if f.isClosed() {
 		return nil, errClosed
 	}
@@ -548,6 +582,9 @@ func (f *fileStore) Remove(k string) error {
 }
 
 // remove removes a key from the store and the index.
+//
+// WARNING - this method is not thread-safe. it should be used by methods
+// which lock.
 func (f *fileStore) remove(k string) error {
 	defer f.updateIndex(func(in *internal) {
 		delete(*in, k)
@@ -577,6 +614,7 @@ func (f *fileStore) Flush() error {
 	})
 
 	root := f.dir.Name()
+
 	// remove all of the data files.
 	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if path == root {
@@ -586,11 +624,13 @@ func (f *fileStore) Flush() error {
 		// if we have a data entry, remove.
 		if filepath.Ext(path) == vExt {
 			// lock the file while we are deleting incase
-			// other clients attempt to read the file.
+			// other clients attempt to read it.
 			fl := <-f.lock(path)
 			if fl.Err != nil {
 				return fl.Err
 			}
+
+			// ensure we release the lock.
 			defer fl.l.Unlock()
 			os.Remove(path)
 		}
