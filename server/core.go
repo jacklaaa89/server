@@ -57,6 +57,7 @@ func New(ctx context.Context, c *Config) (Server, error) {
 	s.store = store
 
 	// initialise gin.
+	gin.SetMode(gin.ReleaseMode)
 	router := gin.Default()
 
 	// define the index route.
